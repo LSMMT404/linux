@@ -300,7 +300,6 @@ static void nfp_repr_clean(struct nfp_repr *repr)
 }
 
 static struct lock_class_key nfp_repr_netdev_xmit_lock_key;
-static struct lock_class_key nfp_repr_netdev_addr_lock_key;
 
 static void nfp_repr_set_lockdep_class_one(struct net_device *dev,
 					   struct netdev_queue *txq,
@@ -311,7 +310,6 @@ static void nfp_repr_set_lockdep_class_one(struct net_device *dev,
 
 static void nfp_repr_set_lockdep_class(struct net_device *dev)
 {
-	lockdep_set_class(&dev->addr_list_lock, &nfp_repr_netdev_addr_lock_key);
 	netdev_for_each_tx_queue(dev, nfp_repr_set_lockdep_class_one, NULL);
 }
 

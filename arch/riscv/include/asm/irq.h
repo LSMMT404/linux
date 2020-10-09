@@ -7,10 +7,8 @@
 #ifndef _ASM_RISCV_IRQ_H
 #define _ASM_RISCV_IRQ_H
 
-#define NR_IRQS         0
-
-void riscv_timer_interrupt(void);
-void riscv_software_interrupt(void);
+#include <linux/interrupt.h>
+#include <linux/linkage.h>
 
 #include <asm-generic/irq.h>
 

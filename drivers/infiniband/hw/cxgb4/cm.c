@@ -495,7 +495,6 @@ static int _put_ep_safe(struct c4iw_dev *dev, struct sk_buff *skb)
 
 	ep = *((struct c4iw_ep **)(skb->cb + 2 * sizeof(void *)));
 	release_ep_resources(ep);
-	kfree_skb(skb);
 	return 0;
 }
 
@@ -506,7 +505,6 @@ static int _put_pass_ep_safe(struct c4iw_dev *dev, struct sk_buff *skb)
 	ep = *((struct c4iw_ep **)(skb->cb + 2 * sizeof(void *)));
 	c4iw_put_ep(&ep->parent_ep->com);
 	release_ep_resources(ep);
-	kfree_skb(skb);
 	return 0;
 }
 
@@ -2424,20 +2422,6 @@ static int accept_cr(struct c4iw_ep *ep, struct sk_buff *skb,
 	enum chip_type adapter_type = ep->com.dev->rdev.lldi.adapter_type;
 
 	pr_debug("ep %p tid %u\n", ep, ep->hwtid);
-
-	skb_get(skb);
-	rpl = cplhdr(skb);
-	if (!is_t4(adapter_type)) {
-		skb_trim(skb, roundup(sizeof(*rpl5), 16));
-		rpl5 = (void *)rpl;
-		INIT_TP_WR(rpl5, ep->hwtid);
-	} else {
-		skb_trim(skb, sizeof(*rpl));
-		INIT_TP_WR(rpl, ep->hwtid);
-	}
-	OPCODE_TID(rpl) = cpu_to_be32(MK_OPCODE_TID(CPL_PASS_ACCEPT_RPL,
-						    ep->hwtid));
-
 	cxgb_best_mtu(ep->com.dev->rdev.lldi.mtus, ep->mtu, &mtu_idx,
 		      enable_tcp_timestamps && req->tcpopt.tstamp,
 		      (ep->com.remote_addr.ss_family == AF_INET) ? 0 : 1);
@@ -2483,6 +2467,20 @@ static int accept_cr(struct c4iw_ep *ep, struct sk_buff *skb,
 		if (tcph->ece && tcph->cwr)
 			opt2 |= CCTRL_ECN_V(1);
 	}
+
+	skb_get(skb);
+	rpl = cplhdr(skb);
+	if (!is_t4(adapter_type)) {
+		skb_trim(skb, roundup(sizeof(*rpl5), 16));
+		rpl5 = (void *)rpl;
+		INIT_TP_WR(rpl5, ep->hwtid);
+	} else {
+		skb_trim(skb, sizeof(*rpl));
+		INIT_TP_WR(rpl, ep->hwtid);
+	}
+	OPCODE_TID(rpl) = cpu_to_be32(MK_OPCODE_TID(CPL_PASS_ACCEPT_RPL,
+						    ep->hwtid));
+
 	if (CHELSIO_CHIP_VERSION(adapter_type) > CHELSIO_T4) {
 		u32 isn = (prandom_u32() & ~7UL) - 1;
 		opt2 |= T5_OPT_2_VALID_F;
@@ -2887,14 +2885,13 @@ static int peer_abort(struct c4iw_dev *dev, struct sk_buff *skb)
 	case MORIBUND:
 	case CLOSING:
 		stop_ep_timer(ep);
-		/*FALLTHROUGH*/
+		fallthrough;
 	case FPDU_MODE:
 		if (ep->com.qp && ep->com.qp->srq) {
 			srqidx = ABORT_RSS_SRQIDX_G(
 					be32_to_cpu(req->srqidx_status));
 			if (srqidx) {
-				complete_cached_srq_buffers(ep,
-							    req->srqidx_status);
+				complete_cached_srq_buffers(ep, srqidx);
 			} else {
 				/* Hold ep ref until finish_peer_abort() */
 				c4iw_get_ep(&ep->com);
@@ -3038,6 +3035,10 @@ static int terminate(struct c4iw_dev *dev, struct sk_buff *skb)
 				       C4IW_QP_ATTR_NEXT_STATE, &attrs, 1);
 		}
 
+		/* As per draft-hilland-iwarp-verbs-v1.0, sec 6.2.3,
+		 * when entering the TERM state the RNIC MUST initiate a CLOSE.
+		 */
+		c4iw_ep_disconnect(ep, 1, GFP_KERNEL);
 		c4iw_put_ep(&ep->com);
 	} else
 		pr_warn("TERM received tid %u no ep/qp\n", tid);
@@ -3281,7 +3282,7 @@ static int get_lladdr(struct net_device *dev, struct in6_addr *addr,
 
 static int pick_local_ip6addrs(struct c4iw_dev *dev, struct iw_cm_id *cm_id)
 {
-	struct in6_addr uninitialized_var(addr);
+	struct in6_addr addr;
 	struct sockaddr_in6 *la6 = (struct sockaddr_in6 *)&cm_id->m_local_addr;
 	struct sockaddr_in6 *ra6 = (struct sockaddr_in6 *)&cm_id->m_remote_addr;
 
@@ -3381,7 +3382,7 @@ int c4iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 		if (raddr->sin_addr.s_addr == htonl(INADDR_ANY)) {
 			err = pick_local_ipaddrs(dev, cm_id);
 			if (err)
-				goto fail2;
+				goto fail3;
 		}
 
 		/* find a route */
@@ -3403,7 +3404,7 @@ int c4iw_connect(struct iw_cm_id *cm_id, struct iw_cm_conn_param *conn_param)
 		if (ipv6_addr_type(&raddr6->sin6_addr) == IPV6_ADDR_ANY) {
 			err = pick_local_ip6addrs(dev, cm_id);
 			if (err)
-				goto fail2;
+				goto fail3;
 		}
 
 		/* find a route */
@@ -3758,7 +3759,7 @@ static void active_ofld_conn_reply(struct c4iw_dev *dev, struct sk_buff *skb,
 			send_fw_act_open_req(ep, atid);
 			return;
 		}
-		/* fall through */
+		fallthrough;
 	case FW_EADDRINUSE:
 		set_bit(ACT_RETRY_INUSE, &ep->com.history);
 		if (ep->retry_count++ < ACT_OPEN_RETRY_COUNT) {
@@ -3876,8 +3877,8 @@ static int read_tcb_rpl(struct c4iw_dev *dev, struct sk_buff *skb)
 		return 0;
 	}
 
-	ep->srqe_idx = t4_tcb_get_field32(tcb, TCB_RQ_START_W, TCB_RQ_START_W,
-			TCB_RQ_START_S);
+	ep->srqe_idx = t4_tcb_get_field32(tcb, TCB_RQ_START_W, TCB_RQ_START_M,
+					  TCB_RQ_START_S);
 cleanup:
 	pr_debug("ep %p tid %u %016x\n", ep, ep->hwtid, ep->srqe_idx);
 

@@ -126,7 +126,7 @@ static void prism2_check_sta_fw_version(local_info_t *local);
 
 #ifdef PRISM2_DOWNLOAD_SUPPORT
 /* hostap_download.c */
-static const struct file_operations prism2_download_aux_dump_proc_fops;
+static const struct proc_ops prism2_download_aux_dump_proc_ops;
 static u8 * prism2_read_pda(struct net_device *dev);
 static int prism2_download(local_info_t *local,
 			   struct prism2_download_param *param);
@@ -3118,7 +3118,7 @@ prism2_init_local_data(struct prism2_helper_functions *funcs, int card_idx,
 	local->func->reset_port = prism2_reset_port;
 	local->func->schedule_reset = prism2_schedule_reset;
 #ifdef PRISM2_DOWNLOAD_SUPPORT
-	local->func->read_aux_fops = &prism2_download_aux_dump_proc_fops;
+	local->func->read_aux_proc_ops = &prism2_download_aux_dump_proc_ops;
 	local->func->download = prism2_download;
 #endif /* PRISM2_DOWNLOAD_SUPPORT */
 	local->func->tx = prism2_tx_80211;
@@ -3366,8 +3366,8 @@ static void prism2_free_local_data(struct net_device *dev)
 }
 
 
-#if (defined(PRISM2_PCI) && defined(CONFIG_PM)) || defined(PRISM2_PCCARD)
-static void prism2_suspend(struct net_device *dev)
+#if defined(PRISM2_PCI) || defined(PRISM2_PCCARD)
+static void __maybe_unused prism2_suspend(struct net_device *dev)
 {
 	struct hostap_interface *iface;
 	struct local_info *local;
@@ -3385,7 +3385,7 @@ static void prism2_suspend(struct net_device *dev)
 	/* Disable hardware and firmware */
 	prism2_hw_shutdown(dev, 0);
 }
-#endif /* (PRISM2_PCI && CONFIG_PM) || PRISM2_PCCARD */
+#endif /* PRISM2_PCI || PRISM2_PCCARD */
 
 
 /* These might at some point be compiled separately and used as separate

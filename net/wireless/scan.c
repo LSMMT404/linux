@@ -556,9 +556,8 @@ cfg80211_find_sched_scan_req(struct cfg80211_registered_device *rdev, u64 reqid)
 {
 	struct cfg80211_sched_scan_request *pos;
 
-	WARN_ON_ONCE(!rcu_read_lock_held() && !lockdep_rtnl_is_held());
-
-	list_for_each_entry_rcu(pos, &rdev->sched_scan_req_list, list) {
+	list_for_each_entry_rcu(pos, &rdev->sched_scan_req_list, list,
+				lockdep_rtnl_is_held()) {
 		if (pos->reqid == reqid)
 			return pos;
 	}
@@ -712,6 +711,16 @@ void cfg80211_bss_expire(struct cfg80211_registered_device *rdev)
 {
 	__cfg80211_bss_expire(rdev, jiffies - IEEE80211_SCAN_RESULT_EXPIRE);
 }
+
+void cfg80211_bss_flush(struct wiphy *wiphy)
+{
+	struct cfg80211_registered_device *rdev = wiphy_to_rdev(wiphy);
+
+	spin_lock_bh(&rdev->bss_lock);
+	__cfg80211_bss_expire(rdev, jiffies);
+	spin_unlock_bh(&rdev->bss_lock);
+}
+EXPORT_SYMBOL(cfg80211_bss_flush);
 
 const struct element *
 cfg80211_find_elem_match(u8 eid, const u8 *ies, unsigned int len,
@@ -1323,8 +1332,8 @@ cfg80211_get_bss_channel(struct wiphy *wiphy, const u8 *ie, size_t ielen,
 		return channel;
 	}
 
-	freq = ieee80211_channel_to_frequency(channel_number, channel->band);
-	alt_channel = ieee80211_get_channel(wiphy, freq);
+	freq = ieee80211_channel_to_freq_khz(channel_number, channel->band);
+	alt_channel = ieee80211_get_channel_khz(wiphy, freq);
 	if (!alt_channel) {
 		if (channel->band == NL80211_BAND_2GHZ) {
 			/*
@@ -1424,7 +1433,7 @@ cfg80211_inform_single_bss_data(struct wiphy *wiphy,
 	switch (ftype) {
 	case CFG80211_BSS_FTYPE_BEACON:
 		ies->from_beacon = true;
-		/* fall through */
+		fallthrough;
 	case CFG80211_BSS_FTYPE_UNKNOWN:
 		rcu_assign_pointer(tmp.pub.beacon_ies, ies);
 		break;
@@ -1434,8 +1443,7 @@ cfg80211_inform_single_bss_data(struct wiphy *wiphy,
 	}
 	rcu_assign_pointer(tmp.pub.ies, ies);
 
-	signal_valid = abs(data->chan->center_freq - channel->center_freq) <=
-		wiphy->max_adj_channel_rssi_comp;
+	signal_valid = data->chan == channel;
 	res = cfg80211_bss_update(wiphy_to_rdev(wiphy), &tmp, signal_valid, ts);
 	if (!res)
 		return NULL;
@@ -1703,8 +1711,7 @@ cfg80211_parse_mbssid_frame_data(struct wiphy *wiphy,
 static void
 cfg80211_update_notlisted_nontrans(struct wiphy *wiphy,
 				   struct cfg80211_bss *nontrans_bss,
-				   struct ieee80211_mgmt *mgmt, size_t len,
-				   gfp_t gfp)
+				   struct ieee80211_mgmt *mgmt, size_t len)
 {
 	u8 *ie, *new_ie, *pos;
 	const u8 *nontrans_ssid, *trans_ssid, *mbssid;
@@ -1714,6 +1721,8 @@ cfg80211_update_notlisted_nontrans(struct wiphy *wiphy,
 	struct cfg80211_bss_ies *new_ies;
 	const struct cfg80211_bss_ies *old;
 	u8 cpy_len;
+
+	lockdep_assert_held(&wiphy_to_rdev(wiphy)->bss_lock);
 
 	ie = mgmt->u.probe_resp.variable;
 
@@ -1731,23 +1740,22 @@ cfg80211_update_notlisted_nontrans(struct wiphy *wiphy,
 	if (!mbssid || mbssid < trans_ssid)
 		return;
 	new_ie_len -= mbssid[1];
-	rcu_read_lock();
+
 	nontrans_ssid = ieee80211_bss_get_ie(nontrans_bss, WLAN_EID_SSID);
-	if (!nontrans_ssid) {
-		rcu_read_unlock();
+	if (!nontrans_ssid)
 		return;
-	}
+
 	new_ie_len += nontrans_ssid[1];
-	rcu_read_unlock();
 
 	/* generate new ie for nontrans BSS
 	 * 1. replace SSID with nontrans BSS' SSID
 	 * 2. skip MBSSID IE
 	 */
-	new_ie = kzalloc(new_ie_len, gfp);
+	new_ie = kzalloc(new_ie_len, GFP_ATOMIC);
 	if (!new_ie)
 		return;
-	new_ies = kzalloc(sizeof(*new_ies) + new_ie_len, gfp);
+
+	new_ies = kzalloc(sizeof(*new_ies) + new_ie_len, GFP_ATOMIC);
 	if (!new_ies)
 		goto out_free;
 
@@ -1852,8 +1860,7 @@ cfg80211_inform_single_bss_frame_data(struct wiphy *wiphy,
 	memcpy(tmp.pub.chain_signal, data->chain_signal, IEEE80211_MAX_CHAINS);
 	ether_addr_copy(tmp.parent_bssid, data->parent_bssid);
 
-	signal_valid = abs(data->chan->center_freq - channel->center_freq) <=
-		wiphy->max_adj_channel_rssi_comp;
+	signal_valid = data->chan == channel;
 	res = cfg80211_bss_update(wiphy_to_rdev(wiphy), &tmp, signal_valid,
 				  jiffies);
 	if (!res)
@@ -1901,6 +1908,8 @@ cfg80211_inform_bss_frame_data(struct wiphy *wiphy,
 	cfg80211_parse_mbssid_frame_data(wiphy, data, mgmt, len,
 					 &non_tx_data, gfp);
 
+	spin_lock_bh(&wiphy_to_rdev(wiphy)->bss_lock);
+
 	/* check if the res has other nontransmitting bss which is not
 	 * in MBSSID IE
 	 */
@@ -1915,8 +1924,9 @@ cfg80211_inform_bss_frame_data(struct wiphy *wiphy,
 		ies2 = rcu_access_pointer(tmp_bss->ies);
 		if (ies2->tsf < ies1->tsf)
 			cfg80211_update_notlisted_nontrans(wiphy, tmp_bss,
-							   mgmt, len, gfp);
+							   mgmt, len);
 	}
+	spin_unlock_bh(&wiphy_to_rdev(wiphy)->bss_lock);
 
 	return res;
 }
@@ -2019,7 +2029,11 @@ void cfg80211_update_assoc_bss_entry(struct wireless_dev *wdev,
 
 	spin_lock_bh(&rdev->bss_lock);
 
-	if (WARN_ON(cbss->pub.channel == chan))
+	/*
+	 * Some APs use CSA also for bandwidth changes, i.e., without actually
+	 * changing the control channel, so no need to update in such a case.
+	 */
+	if (cbss->pub.channel == chan)
 		goto done;
 
 	/* use transmitting bss */

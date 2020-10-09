@@ -16,10 +16,19 @@
 #include <linux/spinlock.h>
 #include <linux/types.h>
 #include <linux/xarray.h>
+#include <linux/local_lock.h>
 
 /* Keep unconverted code working */
 #define radix_tree_root		xarray
 #define radix_tree_node		xa_node
+
+struct radix_tree_preload {
+	local_lock_t lock;
+	unsigned nr;
+	/* nodes->parent points to next preallocated node */
+	struct radix_tree_node *nodes;
+};
+DECLARE_PER_CPU(struct radix_tree_preload, radix_tree_preloads);
 
 /*
  * The bottom two bits of the slot determine how the remaining bits in the
@@ -245,7 +254,7 @@ int radix_tree_tagged(const struct radix_tree_root *, unsigned int tag);
 
 static inline void radix_tree_preload_end(void)
 {
-	preempt_enable();
+	local_unlock(&radix_tree_preloads.lock);
 }
 
 void __rcu **idr_get_free(struct radix_tree_root *root,
@@ -313,24 +322,6 @@ radix_tree_iter_lookup(const struct radix_tree_root *root,
 {
 	radix_tree_iter_init(iter, index);
 	return radix_tree_next_chunk(root, iter, RADIX_TREE_ITER_CONTIG);
-}
-
-/**
- * radix_tree_iter_find - find a present entry
- * @root: radix tree root
- * @iter: iterator state
- * @index: start location
- *
- * This function returns the slot containing the entry with the lowest index
- * which is at least @index.  If @index is larger than any present entry, this
- * function returns NULL.  The @iter is updated to describe the entry found.
- */
-static inline void __rcu **
-radix_tree_iter_find(const struct radix_tree_root *root,
-			struct radix_tree_iter *iter, unsigned long index)
-{
-	radix_tree_iter_init(iter, index);
-	return radix_tree_next_chunk(root, iter, 0);
 }
 
 /**

@@ -31,13 +31,16 @@
 #define PTP_ENABLE_FEATURE (1<<0)
 #define PTP_RISING_EDGE    (1<<1)
 #define PTP_FALLING_EDGE   (1<<2)
+#define PTP_STRICT_FLAGS   (1<<3)
+#define PTP_EXTTS_EDGES    (PTP_RISING_EDGE | PTP_FALLING_EDGE)
 
 /*
  * flag fields valid for the new PTP_EXTTS_REQUEST2 ioctl.
  */
 #define PTP_EXTTS_VALID_FLAGS	(PTP_ENABLE_FEATURE |	\
 				 PTP_RISING_EDGE |	\
-				 PTP_FALLING_EDGE)
+				 PTP_FALLING_EDGE |	\
+				 PTP_STRICT_FLAGS)
 
 /*
  * flag fields valid for the original PTP_EXTTS_REQUEST ioctl.
@@ -50,12 +53,16 @@
 /*
  * Bits of the ptp_perout_request.flags field:
  */
-#define PTP_PEROUT_ONE_SHOT (1<<0)
+#define PTP_PEROUT_ONE_SHOT		(1<<0)
+#define PTP_PEROUT_DUTY_CYCLE		(1<<1)
+#define PTP_PEROUT_PHASE		(1<<2)
 
 /*
  * flag fields valid for the new PTP_PEROUT_REQUEST2 ioctl.
  */
-#define PTP_PEROUT_VALID_FLAGS	(PTP_PEROUT_ONE_SHOT)
+#define PTP_PEROUT_VALID_FLAGS		(PTP_PEROUT_ONE_SHOT | \
+					 PTP_PEROUT_DUTY_CYCLE | \
+					 PTP_PEROUT_PHASE)
 
 /*
  * No flags are valid for the original PTP_PEROUT_REQUEST ioctl
@@ -86,7 +93,9 @@ struct ptp_clock_caps {
 	int n_pins;    /* Number of input/output pins. */
 	/* Whether the clock supports precise system-device cross timestamps */
 	int cross_timestamping;
-	int rsv[13];   /* Reserved for future use. */
+	/* Whether the clock supports adjust phase */
+	int adjust_phase;
+	int rsv[12];   /* Reserved for future use. */
 };
 
 struct ptp_extts_request {
@@ -96,11 +105,33 @@ struct ptp_extts_request {
 };
 
 struct ptp_perout_request {
-	struct ptp_clock_time start;  /* Absolute start time. */
+	union {
+		/*
+		 * Absolute start time.
+		 * Valid only if (flags & PTP_PEROUT_PHASE) is unset.
+		 */
+		struct ptp_clock_time start;
+		/*
+		 * Phase offset. The signal should start toggling at an
+		 * unspecified integer multiple of the period, plus this value.
+		 * The start time should be "as soon as possible".
+		 * Valid only if (flags & PTP_PEROUT_PHASE) is set.
+		 */
+		struct ptp_clock_time phase;
+	};
 	struct ptp_clock_time period; /* Desired period, zero means disable. */
 	unsigned int index;           /* Which channel to configure. */
 	unsigned int flags;
-	unsigned int rsv[4];          /* Reserved for future use. */
+	union {
+		/*
+		 * The "on" time of the signal.
+		 * Must be lower than the period.
+		 * Valid only if (flags & PTP_PEROUT_DUTY_CYCLE) is set.
+		 */
+		struct ptp_clock_time on;
+		/* Reserved for future use. */
+		unsigned int rsv[4];
+	};
 };
 
 #define PTP_MAX_SAMPLES 25 /* Maximum allowed offset measurement samples. */

@@ -33,6 +33,7 @@ static int nf_br_ip_fragment(struct net *net, struct sock *sk,
 {
 	int frag_max_size = BR_INPUT_SKB_CB(skb)->frag_max_size;
 	unsigned int hlen, ll_rs, mtu;
+	ktime_t tstamp = skb->tstamp;
 	struct ip_frag_state state;
 	struct iphdr *iph;
 	int err;
@@ -80,6 +81,7 @@ static int nf_br_ip_fragment(struct net *net, struct sock *sk,
 			if (iter.frag)
 				ip_fraglist_prepare(skb, &iter);
 
+			skb->tstamp = tstamp;
 			err = output(net, sk, data, skb);
 			if (err || !iter.frag)
 				break;
@@ -93,7 +95,7 @@ slow_path:
 	 * This may also be a clone skbuff, we could preserve the geometry for
 	 * the copies but probably not worth the effort.
 	 */
-	ip_frag_init(skb, hlen, ll_rs, frag_max_size, &state);
+	ip_frag_init(skb, hlen, ll_rs, frag_max_size, false, &state);
 
 	while (state.left > 0) {
 		struct sk_buff *skb2;
@@ -104,6 +106,7 @@ slow_path:
 			goto blackhole;
 		}
 
+		skb2->tstamp = tstamp;
 		err = output(net, sk, data, skb2);
 		if (err)
 			goto blackhole;
@@ -165,6 +168,7 @@ static unsigned int nf_ct_br_defrag4(struct sk_buff *skb,
 static unsigned int nf_ct_br_defrag6(struct sk_buff *skb,
 				     const struct nf_hook_state *state)
 {
+#if IS_ENABLED(CONFIG_NF_DEFRAG_IPV6)
 	u16 zone_id = NF_CT_DEFAULT_ZONE_ID;
 	enum ip_conntrack_info ctinfo;
 	struct br_input_skb_cb cb;
@@ -177,14 +181,17 @@ static unsigned int nf_ct_br_defrag6(struct sk_buff *skb,
 
 	br_skb_cb_save(skb, &cb, sizeof(struct inet6_skb_parm));
 
-	err = nf_ipv6_br_defrag(state->net, skb,
-				IP_DEFRAG_CONNTRACK_BRIDGE_IN + zone_id);
+	err = nf_ct_frag6_gather(state->net, skb,
+				 IP_DEFRAG_CONNTRACK_BRIDGE_IN + zone_id);
 	/* queued */
 	if (err == -EINPROGRESS)
 		return NF_STOLEN;
 
 	br_skb_cb_restore(skb, &cb, IP6CB(skb)->frag_max_size);
 	return err == 0 ? NF_ACCEPT : NF_DROP;
+#else
+	return NF_ACCEPT;
+#endif
 }
 
 static int nf_ct_br_ip_check(const struct sk_buff *skb)

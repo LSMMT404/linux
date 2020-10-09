@@ -60,11 +60,6 @@
 		gpio = <&gpiosb 0 GPIO_ACTIVE_HIGH>;
 	};
 
-	usb3_phy: usb3-phy {
-		compatible = "usb-nop-xceiv";
-		vcc-supply = <&exp_usb3_vbus>;
-	};
-
 	vsdc_reg: vsdc-reg {
 		compatible = "regulator-gpio";
 		regulator-name = "vsdc";
@@ -100,7 +95,7 @@
 	};
 
 	sfp: sfp {
-		compatible = "sff,sfp+";
+		compatible = "sff,sfp";
 		i2c-bus = <&i2c0>;
 		los-gpio = <&moxtet_sfp 0 GPIO_ACTIVE_HIGH>;
 		tx-fault-gpio = <&moxtet_sfp 1 GPIO_ACTIVE_HIGH>;
@@ -110,6 +105,14 @@
 
 		/* enabled by U-Boot if SFP module is present */
 		status = "disabled";
+	};
+
+	firmware {
+		turris-mox-rwtm {
+			compatible = "cznic,turris-mox-rwtm";
+			mboxes = <&rwtm 0>;
+			status = "okay";
+		};
 	};
 };
 
@@ -125,17 +128,11 @@
 	};
 };
 
-&pcie_reset_pins {
-	function = "gpio";
-};
-
 &pcie0 {
 	pinctrl-names = "default";
 	pinctrl-0 = <&pcie_reset_pins &pcie_clkreq_pins>;
 	status = "okay";
-	max-link-speed = <2>;
 	reset-gpios = <&gpiosb 3 GPIO_ACTIVE_LOW>;
-	phys = <&comphy1 0>;
 
 	/* enabled by U-Boot if PCIe module is present */
 	status = "disabled";
@@ -176,6 +173,8 @@
 	marvell,pad-type = "sd";
 	vqmmc-supply = <&vsdio_reg>;
 	mmc-pwrseq = <&sdhci1_pwrseq>;
+	/* forbid SDR104 for FCC purposes */
+	sdhci-caps-mask = <0x2 0x0>;
 	status = "okay";
 };
 
@@ -255,10 +254,16 @@
 	status = "okay";
 };
 
+&comphy2 {
+	connector {
+		compatible = "usb-a-connector";
+		phy-supply = <&exp_usb3_vbus>;
+	};
+};
+
 &usb3 {
 	status = "okay";
 	phys = <&comphy2 0>;
-	usb-phy = <&usb3_phy>;
 };
 
 &mdio {

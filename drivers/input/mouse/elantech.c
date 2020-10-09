@@ -383,7 +383,7 @@ static void elantech_report_absolute_v2(struct psmouse *psmouse)
 		 */
 		if (packet[3] & 0x80)
 			fingers = 4;
-		/* fall through */
+		fallthrough;
 	case 1:
 		/*
 		 * byte 1:  .   .   .   .  x11 x10 x9  x8
@@ -1146,7 +1146,7 @@ static int elantech_set_input_params(struct psmouse *psmouse)
 	case 2:
 		__set_bit(BTN_TOOL_QUADTAP, dev->keybit);
 		__set_bit(INPUT_PROP_SEMI_MT, dev->propbit);
-		/* fall through */
+		fallthrough;
 	case 3:
 		if (info->hw_version == 3)
 			elantech_set_buttonpad_prop(psmouse);
@@ -1827,31 +1827,6 @@ static int elantech_create_smbus(struct psmouse *psmouse,
 				  leave_breadcrumbs);
 }
 
-static bool elantech_use_host_notify(struct psmouse *psmouse,
-				     struct elantech_device_info *info)
-{
-	if (ETP_NEW_IC_SMBUS_HOST_NOTIFY(info->fw_version))
-		return true;
-
-	switch (info->bus) {
-	case ETP_BUS_PS2_ONLY:
-		/* expected case */
-		break;
-	case ETP_BUS_SMB_HST_NTFY_ONLY:
-	case ETP_BUS_PS2_SMB_HST_NTFY:
-		/* SMbus implementation is stable since 2018 */
-		if (dmi_get_bios_year() >= 2018)
-			return true;
-		/* fall through */
-	default:
-		psmouse_dbg(psmouse,
-			    "Ignoring SMBus bus provider %d\n", info->bus);
-		break;
-	}
-
-	return false;
-}
-
 /**
  * elantech_setup_smbus - called once the PS/2 devices are enumerated
  * and decides to instantiate a SMBus InterTouch device.
@@ -1871,7 +1846,7 @@ static int elantech_setup_smbus(struct psmouse *psmouse,
 		 * i2c_blacklist_pnp_ids.
 		 * Old ICs are up to the user to decide.
 		 */
-		if (!elantech_use_host_notify(psmouse, info) ||
+		if (!ETP_NEW_IC_SMBUS_HOST_NOTIFY(info->fw_version) ||
 		    psmouse_matches_pnp_id(psmouse, i2c_blacklist_pnp_ids))
 			return -ENXIO;
 	}
@@ -1891,10 +1866,36 @@ static int elantech_setup_smbus(struct psmouse *psmouse,
 	return 0;
 }
 
+static bool elantech_use_host_notify(struct psmouse *psmouse,
+				     struct elantech_device_info *info)
+{
+	if (ETP_NEW_IC_SMBUS_HOST_NOTIFY(info->fw_version))
+		return true;
+
+	switch (info->bus) {
+	case ETP_BUS_PS2_ONLY:
+		/* expected case */
+		break;
+	case ETP_BUS_SMB_ALERT_ONLY:
+	case ETP_BUS_PS2_SMB_ALERT:
+		psmouse_dbg(psmouse, "Ignoring SMBus provider through alert protocol.\n");
+		break;
+	case ETP_BUS_SMB_HST_NTFY_ONLY:
+	case ETP_BUS_PS2_SMB_HST_NTFY:
+		return true;
+	default:
+		psmouse_dbg(psmouse,
+			    "Ignoring SMBus bus provider %d.\n",
+			    info->bus);
+	}
+
+	return false;
+}
+
 int elantech_init_smbus(struct psmouse *psmouse)
 {
 	struct elantech_device_info info;
-	int error = -EINVAL;
+	int error;
 
 	psmouse_reset(psmouse);
 
@@ -2012,7 +2013,7 @@ static int elantech_setup_ps2(struct psmouse *psmouse,
 int elantech_init_ps2(struct psmouse *psmouse)
 {
 	struct elantech_device_info info;
-	int error = -EINVAL;
+	int error;
 
 	psmouse_reset(psmouse);
 
@@ -2033,7 +2034,7 @@ int elantech_init_ps2(struct psmouse *psmouse)
 int elantech_init(struct psmouse *psmouse)
 {
 	struct elantech_device_info info;
-	int error = -EINVAL;
+	int error;
 
 	psmouse_reset(psmouse);
 

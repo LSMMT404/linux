@@ -74,6 +74,7 @@
 #include <net/icmp.h>
 #include <net/checksum.h>
 #include <net/inetpeer.h>
+#include <net/inet_ecn.h>
 #include <net/lwtunnel.h>
 #include <linux/bpf-cgroup.h>
 #include <linux/igmp.h>
@@ -240,8 +241,8 @@ static int ip_finish_output2(struct net *net, struct sock *sk, struct sk_buff *s
 static int ip_finish_output_gso(struct net *net, struct sock *sk,
 				struct sk_buff *skb, unsigned int mtu)
 {
+	struct sk_buff *segs, *nskb;
 	netdev_features_t features;
-	struct sk_buff *segs;
 	int ret = 0;
 
 	/* common case: seglen is <= mtu
@@ -263,7 +264,7 @@ static int ip_finish_output_gso(struct net *net, struct sock *sk,
 	 *    insufficent MTU.
 	 */
 	features = netif_skb_features(skb);
-	BUILD_BUG_ON(sizeof(*IPCB(skb)) > SKB_SGO_CB_OFFSET);
+	BUILD_BUG_ON(sizeof(*IPCB(skb)) > SKB_GSO_CB_OFFSET);
 	segs = skb_gso_segment(skb, features & ~NETIF_F_GSO_MASK);
 	if (IS_ERR_OR_NULL(segs)) {
 		kfree_skb(skb);
@@ -272,8 +273,7 @@ static int ip_finish_output_gso(struct net *net, struct sock *sk,
 
 	consume_skb(skb);
 
-	do {
-		struct sk_buff *nskb = segs->next;
+	skb_list_walk_safe(segs, segs, nskb) {
 		int err;
 
 		skb_mark_not_on_list(segs);
@@ -281,8 +281,7 @@ static int ip_finish_output_gso(struct net *net, struct sock *sk,
 
 		if (err && ret == 0)
 			ret = err;
-		segs = nskb;
-	} while (segs);
+	}
 
 	return ret;
 }
@@ -335,7 +334,7 @@ static int ip_mc_finish_output(struct net *net, struct sock *sk,
 	switch (ret) {
 	case NET_XMIT_CN:
 		do_cn = true;
-		/* fall through */
+		fallthrough;
 	case NET_XMIT_SUCCESS:
 		break;
 	default:
@@ -422,7 +421,7 @@ int ip_mc_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 
 int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 {
-	struct net_device *dev = skb_dst(skb)->dev;
+	struct net_device *dev = skb_dst(skb)->dev, *indev = skb->dev;
 
 	IP_UPD_PO_STATS(net, IPSTATS_MIB_OUT, skb->len);
 
@@ -430,7 +429,7 @@ int ip_output(struct net *net, struct sock *sk, struct sk_buff *skb)
 	skb->protocol = htons(ETH_P_IP);
 
 	return NF_HOOK_COND(NFPROTO_IPV4, NF_INET_POST_ROUTING,
-			    net, sk, skb, NULL, dev,
+			    net, sk, skb, indev, dev,
 			    ip_finish_output,
 			    !(IPCB(skb)->flags & IPSKB_REROUTED));
 }
@@ -541,6 +540,12 @@ no_route:
 }
 EXPORT_SYMBOL(__ip_queue_xmit);
 
+int ip_queue_xmit(struct sock *sk, struct sk_buff *skb, struct flowi *fl)
+{
+	return __ip_queue_xmit(sk, skb, fl, inet_sk(sk)->tos);
+}
+EXPORT_SYMBOL(ip_queue_xmit);
+
 static void ip_copy_metadata(struct sk_buff *to, struct sk_buff *from)
 {
 	to->pkt_type = from->pkt_type;
@@ -645,11 +650,12 @@ void ip_fraglist_prepare(struct sk_buff *skb, struct ip_fraglist_iter *iter)
 EXPORT_SYMBOL(ip_fraglist_prepare);
 
 void ip_frag_init(struct sk_buff *skb, unsigned int hlen,
-		  unsigned int ll_rs, unsigned int mtu,
+		  unsigned int ll_rs, unsigned int mtu, bool DF,
 		  struct ip_frag_state *state)
 {
 	struct iphdr *iph = ip_hdr(skb);
 
+	state->DF = DF;
 	state->hlen = hlen;
 	state->ll_rs = ll_rs;
 	state->mtu = mtu;
@@ -667,9 +673,6 @@ static void ip_frag_ipcb(struct sk_buff *from, struct sk_buff *to,
 {
 	/* Copy the flags to each fragment. */
 	IPCB(to)->flags = IPCB(from)->flags;
-
-	if (IPCB(from)->flags & IPSKB_FRAG_PMTU)
-		state->iph->frag_off |= htons(IP_DF);
 
 	/* ANK: dirty, but effective trick. Upgrade options only if
 	 * the segment to be fragmented was THE FIRST (otherwise,
@@ -738,6 +741,8 @@ struct sk_buff *ip_frag_next(struct sk_buff *skb, struct ip_frag_state *state)
 	 */
 	iph = ip_hdr(skb2);
 	iph->frag_off = htons((state->offset >> 3));
+	if (state->DF)
+		iph->frag_off |= htons(IP_DF);
 
 	/*
 	 *	Added AC : If we are fragmenting a fragment that's not the
@@ -771,6 +776,7 @@ int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 	struct rtable *rt = skb_rtable(skb);
 	unsigned int mtu, hlen, ll_rs;
 	struct ip_fraglist_iter iter;
+	ktime_t tstamp = skb->tstamp;
 	struct ip_frag_state state;
 	int err = 0;
 
@@ -846,6 +852,7 @@ int ip_do_fragment(struct net *net, struct sock *sk, struct sk_buff *skb,
 				ip_fraglist_prepare(skb, &iter);
 			}
 
+			skb->tstamp = tstamp;
 			err = output(net, sk, skb);
 
 			if (!err)
@@ -881,7 +888,8 @@ slow_path:
 	 *	Fragment the datagram.
 	 */
 
-	ip_frag_init(skb, hlen, ll_rs, mtu, &state);
+	ip_frag_init(skb, hlen, ll_rs, mtu, IPCB(skb)->flags & IPSKB_FRAG_PMTU,
+		     &state);
 
 	/*
 	 *	Keep copying data until we run out.
@@ -900,6 +908,7 @@ slow_path:
 		/*
 		 *	Put this fragment into the sending queue.
 		 */
+		skb2->tstamp = tstamp;
 		err = output(net, sk, skb2);
 		if (err)
 			goto fail;
@@ -1254,15 +1263,18 @@ static int ip_setup_cork(struct sock *sk, struct inet_cork *cork,
 		cork->addr = ipc->addr;
 	}
 
-	/*
-	 * We steal reference to this route, caller should not release it
-	 */
-	*rtp = NULL;
 	cork->fragsize = ip_sk_use_pmtu(sk) ?
-			 dst_mtu(&rt->dst) : rt->dst.dev->mtu;
+			 dst_mtu(&rt->dst) : READ_ONCE(rt->dst.dev->mtu);
+
+	if (!inetdev_valid_mtu(cork->fragsize))
+		return -ENETUNREACH;
 
 	cork->gso_size = ipc->gso_size;
+
 	cork->dst = &rt->dst;
+	/* We stole this route, caller should not release it. */
+	*rtp = NULL;
+
 	cork->length = 0;
 	cork->ttl = ipc->ttl;
 	cork->tos = ipc->tos;
@@ -1692,12 +1704,12 @@ void ip_send_unicast_reply(struct sock *sk, struct sk_buff *skb,
 	if (IS_ERR(rt))
 		return;
 
-	inet_sk(sk)->tos = arg->tos;
+	inet_sk(sk)->tos = arg->tos & ~INET_ECN_MASK;
 
 	sk->sk_protocol = ip_hdr(skb)->protocol;
 	sk->sk_bound_dev_if = arg->bound_dev_if;
 	sk->sk_sndbuf = sysctl_wmem_default;
-	sk->sk_mark = fl4.flowi4_mark;
+	ipc.sockc.mark = fl4.flowi4_mark;
 	err = ip_append_data(sk, &fl4, ip_reply_glue_bits, arg->iov->iov_base,
 			     len, 0, &ipc, &rt, MSG_DONTWAIT);
 	if (unlikely(err)) {

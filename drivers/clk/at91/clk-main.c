@@ -175,7 +175,7 @@ static bool clk_main_rc_osc_ready(struct regmap *regmap)
 
 	regmap_read(regmap, AT91_PMC_SR, &status);
 
-	return status & AT91_PMC_MOSCRCS;
+	return !!(status & AT91_PMC_MOSCRCS);
 }
 
 static int clk_main_rc_osc_prepare(struct clk_hw *hw)
@@ -297,7 +297,10 @@ static int clk_main_probe_frequency(struct regmap *regmap)
 		regmap_read(regmap, AT91_CKGR_MCFR, &mcfr);
 		if (mcfr & AT91_PMC_MAINRDY)
 			return 0;
-		usleep_range(MAINF_LOOP_MIN_WAIT, MAINF_LOOP_MAX_WAIT);
+		if (system_state < SYSTEM_RUNNING)
+			udelay(MAINF_LOOP_MIN_WAIT);
+		else
+			usleep_range(MAINF_LOOP_MIN_WAIT, MAINF_LOOP_MAX_WAIT);
 	} while (time_before(prep_time, timeout));
 
 	return -ETIMEDOUT;
@@ -333,7 +336,7 @@ static int clk_rm9200_main_is_prepared(struct clk_hw *hw)
 
 	regmap_read(clkmain->regmap, AT91_CKGR_MCFR, &status);
 
-	return status & AT91_PMC_MAINRDY ? 1 : 0;
+	return !!(status & AT91_PMC_MAINRDY);
 }
 
 static unsigned long clk_rm9200_main_recalc_rate(struct clk_hw *hw,
@@ -395,7 +398,7 @@ static inline bool clk_sam9x5_main_ready(struct regmap *regmap)
 
 	regmap_read(regmap, AT91_PMC_SR, &status);
 
-	return status & AT91_PMC_MOSCSELS ? 1 : 0;
+	return !!(status & AT91_PMC_MOSCSELS);
 }
 
 static int clk_sam9x5_main_prepare(struct clk_hw *hw)

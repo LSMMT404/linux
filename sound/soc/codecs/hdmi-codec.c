@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 /*
  * ALSA SoC codec for HDMI encoder drivers
- * Copyright (C) 2015 Texas Instruments Incorporated - http://www.ti.com/
+ * Copyright (C) 2015 Texas Instruments Incorporated - https://www.ti.com/
  * Author: Jyri Sarha <jsarha@ti.com>
  */
 #include <linux/module.h>
@@ -275,6 +275,7 @@ struct hdmi_codec_priv {
 	struct snd_pcm_chmap *chmap_info;
 	unsigned int chmap_idx;
 	struct mutex lock;
+	bool busy;
 	struct snd_soc_jack *jack;
 	unsigned int jack_status;
 };
@@ -292,7 +293,7 @@ static int hdmi_eld_ctl_info(struct snd_kcontrol *kcontrol,
 			     struct snd_ctl_elem_info *uinfo)
 {
 	uinfo->type = SNDRV_CTL_ELEM_TYPE_BYTES;
-	uinfo->count = FIELD_SIZEOF(struct hdmi_codec_priv, eld);
+	uinfo->count = sizeof_field(struct hdmi_codec_priv, eld);
 
 	return 0;
 }
@@ -390,9 +391,10 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
 	int ret = 0;
 
-	ret = mutex_trylock(&hcp->lock);
-	if (!ret) {
+	mutex_lock(&hcp->lock);
+	if (hcp->busy) {
 		dev_err(dai->dev, "Only one simultaneous stream supported!\n");
+		mutex_unlock(&hcp->lock);
 		return -EINVAL;
 	}
 
@@ -405,20 +407,20 @@ static int hdmi_codec_startup(struct snd_pcm_substream *substream,
 	if (hcp->hcd.ops->get_eld) {
 		ret = hcp->hcd.ops->get_eld(dai->dev->parent, hcp->hcd.data,
 					    hcp->eld, sizeof(hcp->eld));
+		if (ret)
+			goto err;
 
-		if (!ret) {
-			ret = snd_pcm_hw_constraint_eld(substream->runtime,
-							hcp->eld);
-			if (ret)
-				goto err;
-		}
+		ret = snd_pcm_hw_constraint_eld(substream->runtime, hcp->eld);
+		if (ret)
+			goto err;
+
 		/* Select chmap supported */
 		hdmi_codec_eld_chmap(hcp);
 	}
-	return 0;
+
+	hcp->busy = true;
 
 err:
-	/* Release the exclusive lock on error */
 	mutex_unlock(&hcp->lock);
 	return ret;
 }
@@ -431,6 +433,8 @@ static void hdmi_codec_shutdown(struct snd_pcm_substream *substream,
 	hcp->chmap_idx = HDMI_CODEC_CHMAP_IDX_UNKNOWN;
 	hcp->hcd.ops->audio_shutdown(dai->dev->parent, hcp->hcd.data);
 
+	mutex_lock(&hcp->lock);
+	hcp->busy = false;
 	mutex_unlock(&hcp->lock);
 }
 
@@ -554,15 +558,24 @@ static int hdmi_codec_i2s_set_fmt(struct snd_soc_dai *dai,
 	return 0;
 }
 
-static int hdmi_codec_digital_mute(struct snd_soc_dai *dai, int mute)
+static int hdmi_codec_mute(struct snd_soc_dai *dai, int mute, int direction)
 {
 	struct hdmi_codec_priv *hcp = snd_soc_dai_get_drvdata(dai);
 
-	if (hcp->hcd.ops->digital_mute)
-		return hcp->hcd.ops->digital_mute(dai->dev->parent,
-						  hcp->hcd.data, mute);
+	/*
+	 * ignore if direction was CAPTURE
+	 * and it had .no_capture_mute flag
+	 * see
+	 *	snd_soc_dai_digital_mute()
+	 */
+	if (hcp->hcd.ops->mute_stream &&
+	    (direction == SNDRV_PCM_STREAM_PLAYBACK ||
+	     !hcp->hcd.ops->no_capture_mute))
+		return hcp->hcd.ops->mute_stream(dai->dev->parent,
+						 hcp->hcd.data,
+						 mute, direction);
 
-	return 0;
+	return -ENOTSUPP;
 }
 
 static const struct snd_soc_dai_ops hdmi_codec_i2s_dai_ops = {
@@ -570,14 +583,14 @@ static const struct snd_soc_dai_ops hdmi_codec_i2s_dai_ops = {
 	.shutdown	= hdmi_codec_shutdown,
 	.hw_params	= hdmi_codec_hw_params,
 	.set_fmt	= hdmi_codec_i2s_set_fmt,
-	.digital_mute	= hdmi_codec_digital_mute,
+	.mute_stream	= hdmi_codec_mute,
 };
 
 static const struct snd_soc_dai_ops hdmi_codec_spdif_dai_ops = {
 	.startup	= hdmi_codec_startup,
 	.shutdown	= hdmi_codec_shutdown,
 	.hw_params	= hdmi_codec_hw_params,
-	.digital_mute	= hdmi_codec_digital_mute,
+	.mute_stream	= hdmi_codec_mute,
 };
 
 #define HDMI_RATES	(SNDRV_PCM_RATE_32000 | SNDRV_PCM_RATE_44100 |\
@@ -775,7 +788,17 @@ static int hdmi_of_xlate_dai_id(struct snd_soc_component *component,
 	return ret;
 }
 
+static void hdmi_remove(struct snd_soc_component *component)
+{
+	struct hdmi_codec_priv *hcp = snd_soc_component_get_drvdata(component);
+
+	if (hcp->hcd.ops->hook_plugged_cb)
+		hcp->hcd.ops->hook_plugged_cb(component->dev->parent,
+					      hcp->hcd.data, NULL, NULL);
+}
+
 static const struct snd_soc_component_driver hdmi_driver = {
+	.remove			= hdmi_remove,
 	.dapm_widgets		= hdmi_widgets,
 	.num_dapm_widgets	= ARRAY_SIZE(hdmi_widgets),
 	.of_xlate_dai_id	= hdmi_of_xlate_dai_id,

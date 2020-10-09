@@ -7,6 +7,7 @@
 #include <linux/clocksource.h>
 #include <linux/delay.h>
 #include <asm/sbi.h>
+#include <asm/processor.h>
 
 unsigned long riscv_timebase;
 EXPORT_SYMBOL_GPL(riscv_timebase);
@@ -24,4 +25,13 @@ void __init time_init(void)
 
 	lpj_fine = riscv_timebase / HZ;
 	timer_probe();
+}
+
+void clocksource_arch_init(struct clocksource *cs)
+{
+#ifdef CONFIG_GENERIC_GETTIMEOFDAY
+	cs->vdso_clock_mode = VDSO_CLOCKMODE_ARCHTIMER;
+#else
+	cs->vdso_clock_mode = VDSO_CLOCKMODE_NONE;
+#endif
 }

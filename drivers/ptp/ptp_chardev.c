@@ -136,6 +136,7 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 		caps.pps = ptp->info->pps;
 		caps.n_pins = ptp->info->n_pins;
 		caps.cross_timestamping = ptp->info->getcrosststamp != NULL;
+		caps.adjust_phase = ptp->info->adjphase != NULL;
 		if (copy_to_user((void __user *)arg, &caps, sizeof(caps)))
 			err = -EFAULT;
 		break;
@@ -149,11 +150,21 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 			err = -EFAULT;
 			break;
 		}
-		if (((req.extts.flags & ~PTP_EXTTS_VALID_FLAGS) ||
-			req.extts.rsv[0] || req.extts.rsv[1]) &&
-			cmd == PTP_EXTTS_REQUEST2) {
-			err = -EINVAL;
-			break;
+		if (cmd == PTP_EXTTS_REQUEST2) {
+			/* Tell the drivers to check the flags carefully. */
+			req.extts.flags |= PTP_STRICT_FLAGS;
+			/* Make sure no reserved bit is set. */
+			if ((req.extts.flags & ~PTP_EXTTS_VALID_FLAGS) ||
+			    req.extts.rsv[0] || req.extts.rsv[1]) {
+				err = -EINVAL;
+				break;
+			}
+			/* Ensure one of the rising/falling edge bits is set. */
+			if ((req.extts.flags & PTP_ENABLE_FEATURE) &&
+			    (req.extts.flags & PTP_EXTTS_EDGES) == 0) {
+				err = -EINVAL;
+				break;
+			}
 		} else if (cmd == PTP_EXTTS_REQUEST) {
 			req.extts.flags &= PTP_EXTTS_V1_VALID_FLAGS;
 			req.extts.rsv[0] = 0;
@@ -165,7 +176,10 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 		}
 		req.type = PTP_CLK_REQ_EXTTS;
 		enable = req.extts.flags & PTP_ENABLE_FEATURE ? 1 : 0;
+		if (mutex_lock_interruptible(&ptp->pincfg_mux))
+			return -ERESTARTSYS;
 		err = ops->enable(ops, &req, enable);
+		mutex_unlock(&ptp->pincfg_mux);
 		break;
 
 	case PTP_PEROUT_REQUEST:
@@ -177,12 +191,46 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 			err = -EFAULT;
 			break;
 		}
-		if (((req.perout.flags & ~PTP_PEROUT_VALID_FLAGS) ||
-			req.perout.rsv[0] || req.perout.rsv[1] ||
-			req.perout.rsv[2] || req.perout.rsv[3]) &&
-			cmd == PTP_PEROUT_REQUEST2) {
-			err = -EINVAL;
-			break;
+		if (cmd == PTP_PEROUT_REQUEST2) {
+			struct ptp_perout_request *perout = &req.perout;
+
+			if (perout->flags & ~PTP_PEROUT_VALID_FLAGS) {
+				err = -EINVAL;
+				break;
+			}
+			/*
+			 * The "on" field has undefined meaning if
+			 * PTP_PEROUT_DUTY_CYCLE isn't set, we must still treat
+			 * it as reserved, which must be set to zero.
+			 */
+			if (!(perout->flags & PTP_PEROUT_DUTY_CYCLE) &&
+			    (perout->rsv[0] || perout->rsv[1] ||
+			     perout->rsv[2] || perout->rsv[3])) {
+				err = -EINVAL;
+				break;
+			}
+			if (perout->flags & PTP_PEROUT_DUTY_CYCLE) {
+				/* The duty cycle must be subunitary. */
+				if (perout->on.sec > perout->period.sec ||
+				    (perout->on.sec == perout->period.sec &&
+				     perout->on.nsec > perout->period.nsec)) {
+					err = -ERANGE;
+					break;
+				}
+			}
+			if (perout->flags & PTP_PEROUT_PHASE) {
+				/*
+				 * The phase should be specified modulo the
+				 * period, therefore anything equal or larger
+				 * than 1 period is invalid.
+				 */
+				if (perout->phase.sec > perout->period.sec ||
+				    (perout->phase.sec == perout->period.sec &&
+				     perout->phase.nsec >= perout->period.nsec)) {
+					err = -ERANGE;
+					break;
+				}
+			}
 		} else if (cmd == PTP_PEROUT_REQUEST) {
 			req.perout.flags &= PTP_PEROUT_V1_VALID_FLAGS;
 			req.perout.rsv[0] = 0;
@@ -196,7 +244,10 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 		}
 		req.type = PTP_CLK_REQ_PEROUT;
 		enable = req.perout.period.sec || req.perout.period.nsec;
+		if (mutex_lock_interruptible(&ptp->pincfg_mux))
+			return -ERESTARTSYS;
 		err = ops->enable(ops, &req, enable);
+		mutex_unlock(&ptp->pincfg_mux);
 		break;
 
 	case PTP_ENABLE_PPS:
@@ -207,7 +258,10 @@ long ptp_ioctl(struct posix_clock *pc, unsigned int cmd, unsigned long arg)
 			return -EPERM;
 		req.type = PTP_CLK_REQ_PPS;
 		enable = arg ? 1 : 0;
+		if (mutex_lock_interruptible(&ptp->pincfg_mux))
+			return -ERESTARTSYS;
 		err = ops->enable(ops, &req, enable);
+		mutex_unlock(&ptp->pincfg_mux);
 		break;
 
 	case PTP_SYS_OFFSET_PRECISE:
